@@ -1,0 +1,18 @@
+{
+  "name": "flockord",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord notifier for SparrowMap (map.sparrowmap.com) public sightings inside a set area",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once",
+    "check": "node src/index.js --check",
+    "notify-test": "node src/index.js --test"
+  },
+  "dependencies": {}
+}

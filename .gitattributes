@@ -1,0 +1,4 @@
+# The app runs in a Linux container, so the repository is LF everywhere. Without
+# this, a Windows checkout rewrites notify-test.sh with CRLF and the shebang
+# breaks the moment anyone runs it on the server.
+* text=auto eol=lf

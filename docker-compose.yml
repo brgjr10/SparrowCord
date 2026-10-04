@@ -1,0 +1,22 @@
+services:
+  flockord:
+    build: .
+    image: flockord:latest
+    container_name: flockord
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Overrides config.json when set; handy for Portainer stacks.
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      AREA_PLACE: ${AREA_PLACE:-}
+      AREA_RADIUS_MILES: ${AREA_RADIUS_MILES:-}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - state:/app/data
+    ports:
+      - "${HEALTH_PORT:-8085}:8020"
+
+volumes:
+  state:

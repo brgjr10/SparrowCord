@@ -1,0 +1,31 @@
+{
+  "discord": {
+    "webhookUrl": "https://discord.com/api/webhooks/000000000000000000/REPLACE_WITH_YOUR_WEBHOOK_TOKEN",
+    "username": "SparrowMap",
+    "avatarUrl": "https://map.sparrowmap.com/static/mark.png",
+    "pingEveryone": false,
+    "postTimeoutMs": 20000
+  },
+  "area": {
+    "place": "Austin, Texas",
+    "radiusMiles": 10
+  },
+  "poll": {
+    "intervalSeconds": 60,
+    "backfillHours": 12,
+    "overlapSeconds": 120,
+    "maxPostsPerCycle": 10,
+    "minSecondsBetweenPosts": 4,
+    "requestTimeoutMs": 15000
+  },
+  "filters": {
+    "classes": []
+  },
+  "links": {
+    "geoProvider": "osm"
+  },
+  "server": {
+    "port": 8020
+  },
+  "logLevel": "info"
+}
