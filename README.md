@@ -1,4 +1,4 @@
-# flockord
+# SparrowCord
 
 Discord notifications for [SparrowMap](https://map.sparrowmap.com/) — when a new
 public sighting is published inside a radius you choose, the photo and the
