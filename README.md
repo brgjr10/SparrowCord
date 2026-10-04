@@ -2,7 +2,7 @@
 
 Discord notifications for [SparrowMap](https://map.sparrowmap.com/) — when a new
 public sighting is published inside a radius you choose, the photo and the
-location land in a Discord channel.
+location land in a Discord channel. [SparrowMap GitHub](https://github.com/SparrowMap/sparrowmap)
 
 No bot token, no privileged intents, no gateway connection. One poll a minute
 against a public JSON feed, and a webhook POST when something happens.
