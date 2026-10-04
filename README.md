@@ -6,8 +6,7 @@ location land in a Discord channel.
 
 [SparrowMap/sparrowmap](https://github.com/SparrowMap/sparrowmap)
 
-<img width="600" height="527" alt="image" src="https://github.com/user-attachments/assets/12934957-db68-4b70-910a-f09733c76540" />
-
+<img width="1280" height="640" alt="image" src="https://github.com/user-attachments/assets/897889c6-def8-420c-86de-46f867016ff9" />
 
 No bot token, no privileged intents, no gateway connection. One poll a minute
 against a public JSON feed, and a webhook POST when something happens.
