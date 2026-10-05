@@ -82,8 +82,9 @@ node src/index.js --dry-run --area "Austin, Texas" --radius 12 --backfill-hours 
 node src/index.js --test                        # post the newest sighting on the map, right now
 ```
 
-`--dry-run` prints exactly what it would send and touches no state you care
-about. Both exit when they are done.
+`--dry-run` prints exactly what it would send and **touches no state at all** —
+it does not mark a sighting as announced, advance the poll cursor, or change
+`state.json`. Both exit when they are done.
 
 ### 4. Test message
 
@@ -138,7 +139,7 @@ npm start
 | `area.lat` / `area.lon` | `null` | Exact watch centre. Overrides nothing else — give one or the other. |
 | `area.radiusMiles` | `10` | Radius around the centre. |
 | `poll.intervalSeconds` | `60` | Poll period. Floor is 15 s. |
-| `poll.backfillHours` | `12` | How far back the **first** poll looks. |
+| `poll.backfillHours` | `12` | How far back the **first** poll looks. After that, each poll starts from the last one (minus `overlapSeconds`), capped at 7 days. |
 | `poll.overlapSeconds` | `120` | Re-read window on every poll so late approvals are not missed. |
 | `poll.maxPostsPerCycle` | `10` | Ceiling per poll. Anything left is announced on the next one — nothing is dropped. |
 | `poll.maxPostAttempts` | `5` | Give up on a sighting after this many Discord failures, loudly, rather than retrying forever. |
@@ -149,9 +150,10 @@ npm start
 | `logLevel` | `info` | `debug`, `info`, `warn`, `error`. |
 
 Every one of these can be overridden by an environment variable, which is what
-the compose file exposes: `DISCORD_WEBHOOK_URL`, `AREA_PLACE`, `AREA_LAT`,
-`AREA_LON`, `AREA_RADIUS_MILES`, `POLL_INTERVAL_SECONDS`,
-`MAX_POSTS_PER_CYCLE`, `BACKFILL_HOURS`, `LOG_LEVEL`, `PORT`, `STATE_PATH`,
+the compose file exposes: `DISCORD_WEBHOOK_URL`, `DISCORD_USERNAME`,
+`AREA_PLACE`, `AREA_LAT`, `AREA_LON`, `AREA_RADIUS_MILES`,
+`POLL_INTERVAL_SECONDS`, `MAX_POSTS_PER_CYCLE`, `BACKFILL_HOURS`,
+`LINK_GEO_PROVIDER`, `PING_EVERYONE`, `LOG_LEVEL`, `PORT`, `STATE_PATH`,
 `CONFIG_PATH`.
 
 ---
@@ -170,7 +172,7 @@ node src/index.js --area "El Paso, Texas" --radius 5
 node src/index.js --verbose           debug logging
 ```
 
-`--test` needs a webhook; every other one-shot flag does not.
+`--test` and `--once` need a webhook; `--check` and `--dry-run` do not.
 
 ### From the container
 
@@ -202,8 +204,16 @@ counters for posts / skipped / pending failures.
 curl -s localhost:8085/healthz | jq
 ```
 
-The compose file maps it to host port **8085** by default (`HEALTH_PORT`) and
-uses it for the container healthcheck.
+The compose file maps it to host port **8085** by default (`HEALTH_PORT`), bound
+to loopback. It is for your own monitoring — the container healthcheck reaches
+the endpoint on `127.0.0.1:8020` inside the image and never traverses the host
+mapping, so a failing healthcheck does not mean the port is unreachable.
+
+**Docker will not restart an `unhealthy` container.** `restart: unless-stopped`
+acts only when the process exits, so a wedged notifier keeps running and never
+self-heals. Wire `/healthz` into something external — Uptime Kuma, or a
+`docker compose restart` triggered by a monitor — if you want a dead webhook to
+be caught and the container restarted. (SPARROWCORD-020)
 
 ---
 
@@ -214,19 +224,20 @@ returned 145 sightings in a 72-hour window while this was being built. A busy
 area at that radius will bury a channel. Start at 2–3 miles, widen only if you
 are actually going to read it.
 
-**First run announces a backlog.** `backfillHours` is how far back it looks, so
-start it at `1` or `2` for the first run and raise it later if you want history.
-Anything past `maxPostsPerCycle` is queued, not dropped: the cursor in
-`data/state.json` holds the window open until every row has been announced or has
-failed `maxPostAttempts` times.
+**First run announces a backlog.** `backfillHours` is how far back the first
+poll looks — it really is a knob, so start it at `1` or `2` for the first run and
+raise it later if you want history. Anything past `maxPostsPerCycle` is queued,
+not dropped: the cursor in `data/state.json` holds the window open until every
+row has been announced or has failed `maxPostAttempts` times.
 
 **State lives in `data/state.json`** (a named volume in Docker). Delete it to
 reset — the next poll starts a fresh backfill.
 
 **A stuck backlog stops at seven days.** The poll window is never more than seven
 days wide, so if a webhook is broken for long enough that the backlog reaches
-back past that, the oldest rows are abandoned. They are counted in `skipped` on
-the health endpoint rather than vanishing quietly.
+back past that, the oldest rows are abandoned. They are not counted anywhere —
+`skipped` counts only rows Discord rejected after exhausting their retries — so
+watch `pendingFailures` on `/healthz` instead of expecting a tally.
 
 ---
 

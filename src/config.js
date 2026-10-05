@@ -122,12 +122,26 @@ export function loadConfig(env = process.env) {
   cfg.filters.classes = Array.isArray(cfg.filters.classes)
     ? cfg.filters.classes.map((c) => String(c).toLowerCase()).filter(Boolean)
     : [];
-  cfg.links.geoProvider = ['osm', 'google', 'none'].includes(cfg.links.geoProvider)
+  const ALLOWED_GEO_PROVIDERS = ['osm', 'google', 'none'];
+  cfg.links.geoProvider = ALLOWED_GEO_PROVIDERS.includes(cfg.links.geoProvider)
     ? cfg.links.geoProvider
-    : 'osm';
+    : (console.warn(`unknown links.geoProvider "${cfg.links.geoProvider}" — using "osm"`), 'osm');
 
   if (!Number.isFinite(cfg.area.radiusMiles) || cfg.area.radiusMiles <= 0) {
     throw new Error('area.radiusMiles must be a positive number of miles');
+  }
+  // These are passed straight into AbortSignal.timeout, which throws a TypeError
+  // on a string and a RangeError on anything outside [0, 4294967295]. A quoted
+  // number in JSON ("20000") is a plausible typo, so reject at startup like
+  // radiusMiles — coerce to a number, but refuse anything that was not numeric.
+  // (SPARROWCORD-007)
+  for (const [key, value] of [
+    ['discord.postTimeoutMs', cfg.discord.postTimeoutMs],
+    ['poll.requestTimeoutMs', cfg.poll.requestTimeoutMs],
+  ]) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 4294967295) {
+      throw new Error(`${key} must be a positive number of milliseconds (got ${JSON.stringify(value)})`);
+    }
   }
   const hasCoords = Number.isFinite(cfg.area.lat) && Number.isFinite(cfg.area.lon);
   if (!hasCoords && !cfg.area.place) {

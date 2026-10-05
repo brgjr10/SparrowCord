@@ -15,6 +15,7 @@
     "backfillHours": 12,
     "overlapSeconds": 120,
     "maxPostsPerCycle": 10,
+    "maxPostAttempts": 5,
     "minSecondsBetweenPosts": 4,
     "requestTimeoutMs": 15000
   },

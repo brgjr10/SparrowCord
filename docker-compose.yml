@@ -16,7 +16,15 @@ services:
       - ./config.json:/app/config.json:ro
       - state:/app/data
     ports:
-      - "${HEALTH_PORT:-8085}:8020"
+      # Bound to loopback: nothing off-host needs the health body, and the in-container
+      # HEALTHCHECK reaches it on 127.0.0.1:$PORT (8020) without traversing this mapping.
+      # (SPARROWCORD-012)
+      - "127.0.0.1:${HEALTH_PORT:-8085}:8020"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   state:

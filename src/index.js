@@ -9,6 +9,8 @@ import { log } from './log.js';
 import * as sparrow from './sparrow.js';
 import { Store } from './store.js';
 
+const SELF = fileURLToPath(import.meta.url);
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
@@ -22,13 +24,44 @@ function parseArgs(argv) {
     else if (arg === '--ping') flags.ping = true;
     else if (arg === '--verbose' || arg === '-v') flags.verbose = true;
     else if (arg.startsWith('--area=')) flags.area = arg.slice(7);
-    else if (arg === '--area') flags.area = argv[++i];
-    else if (arg.startsWith('--radius=')) flags.radius = Number(arg.slice(9));
-    else if (arg === '--radius') flags.radius = Number(argv[++i]);
-    else if (arg === '--backfill-hours') flags.backfillHours = Number(argv[++i]);
+    else if (arg === '--area') {
+      if (i + 1 >= argv.length) throw new Error('--area needs a value');
+      flags.area = argv[++i];
+    } else if (arg.startsWith('--radius=')) {
+      const raw = arg.slice(9);
+      // Number('') is 0, so an empty value would otherwise be accepted as radius 0.
+      if (raw === '') throw new Error('--radius needs a number');
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error('--radius needs a number');
+      flags.radius = n;
+    } else if (arg === '--radius') {
+      if (i + 1 >= argv.length) throw new Error('--radius needs a value');
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n)) throw new Error('--radius needs a number');
+      flags.radius = n;
+    } else if (arg.startsWith('--backfill-hours=')) {
+      const raw = arg.slice(17);
+      // Number('') is 0, so an empty value would otherwise be accepted as 0 hours.
+      if (raw === '') throw new Error('--backfill-hours needs a number');
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error('--backfill-hours needs a number');
+      flags.backfillHours = n;
+    } else if (arg === '--backfill-hours') {
+      if (i + 1 >= argv.length) throw new Error('--backfill-hours needs a value');
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n)) throw new Error('--backfill-hours needs a number');
+      flags.backfillHours = n;
+    } else {
+      // The parser must not silently discard a flag the operator typed: a typo
+      // or an empty value otherwise exits 0 having done nothing at all.
+      // (SPARROWCORD-013)
+      throw new Error(`unknown or incomplete flag: ${arg}`);
+    }
   }
   return flags;
 }
+
+export { parseArgs };
 
 async function resolveCenter(config) {
   if (Number.isFinite(config.area.lat) && Number.isFinite(config.area.lon)) {
@@ -59,9 +92,14 @@ function cycleWindow(store, config, nowSec) {
     ? lastPoll - config.poll.overlapSeconds
     : nowSec - config.poll.backfillHours * 3600;
   const backlog = store.data.backlogSince;
+  // The older anchor wins, but never past now - 7 days: a request for 1 h must
+  // yield a 1 h window, and a 14-day backlog must be capped at 7 days.
+  // (SPARROWCORD-001)
   const since = Math.min(rolling, Number.isFinite(backlog) ? backlog : rolling);
-  return Math.max(0, Math.min(since, nowSec - MAX_WINDOW_S));
+  return Math.max(0, Math.max(since, nowSec - MAX_WINDOW_S));
 }
+
+export { cycleWindow };
 
 function summarize(sighting, detail, distance) {
   const where = detail?.where ?? {};
@@ -76,11 +114,11 @@ function summarize(sighting, detail, distance) {
   };
 }
 
-async function runCycle({ config, store, center, dryRun }) {
+async function runCycle({ config, store, center, dryRun, sparrow: sparrowClient = sparrow }) {
   const nowSec = Date.now() / 1000;
   const since = cycleWindow(store, config, nowSec);
 
-  const rows = await sparrow.fetchSightings({ since, timeoutMs: config.poll.requestTimeoutMs });
+  const rows = await sparrowClient.fetchSightings({ since, timeoutMs: config.poll.requestTimeoutMs });
   const allowedClasses = new Set(config.filters.classes);
 
   const inArea = rows.filter((r) => {
@@ -92,7 +130,9 @@ async function runCycle({ config, store, center, dryRun }) {
   const fresh = inArea.filter((r) => !store.hasSeen(r.id));
   log.info('poll', `${rows.length} in window, ${inArea.length} in area, ${fresh.length} unannounced`);
   if (!fresh.length) {
-    store.recordPoll({ since: nowSec, backlogSince: null });
+    // A dry run must not advance the poll cursor either: it is a read-only
+    // rehearsal, so it leaves state.json byte-identical. (SPARROWCORD-002)
+    if (!dryRun) store.recordPoll({ since: nowSec, backlogSince: null });
     return { polled: rows.length, inArea: inArea.length, posted: 0, held: 0 };
   }
 
@@ -109,7 +149,7 @@ async function runCycle({ config, store, center, dryRun }) {
 
     let detail = null;
     try {
-      detail = await sparrow.fetchDetail(sighting.id, config.poll.requestTimeoutMs);
+      detail = await sparrowClient.fetchDetail(sighting.id, config.poll.requestTimeoutMs);
     } catch (err) {
       log.warn('detail lookup failed, posting without road/town', err.message);
     }
@@ -117,36 +157,39 @@ async function runCycle({ config, store, center, dryRun }) {
     let snapshot = null;
     if (sighting.snap) {
       try {
-        snapshot = await sparrow.fetchSnapshot(sighting.snap, config.poll.requestTimeoutMs);
+        snapshot = await sparrowClient.fetchSnapshot(sighting.snap, config.poll.requestTimeoutMs);
       } catch (err) {
         log.warn('snapshot download failed, posting without photo', err.message);
       }
     }
 
     if (dryRun) {
+      // A dry run is a read-only rehearsal: it prints what would be sent and
+      // touches no state, so a real alert is never marked announced and
+      // permanently suppressed. (SPARROWCORD-002)
       log.info('dry-run', summarize(sighting, detail, distance));
-    } else {
-      try {
-        await postSighting(sighting, { detail, distanceMiles: distance, config, snapshot });
-        log.info('posted', summarize(sighting, detail, distance));
-        posted += 1;
-      } catch (err) {
-        // Leave it unseen and hold the window open so the next cycle retries it
-        // rather than dropping the sighting on the floor — until it has failed
-        // often enough that retrying is just noise.
-        const attempts = store.noteFailure(sighting.id);
-        if (attempts >= config.poll.maxPostAttempts) {
-          log.error(
-            'giving up on this sighting after repeated Discord failures',
-            `${sighting.id} (${attempts} attempts, last: ${err.message})`,
-          );
-          store.markSkipped(sighting.id);
-        } else {
-          unannounced.add(sighting.id);
-          log.error('discord post failed, will retry next cycle', `${sighting.id} (attempt ${attempts}): ${err.message}`);
-        }
-        continue;
+      continue;
+    }
+    try {
+      await postSighting(sighting, { detail, distanceMiles: distance, config, snapshot });
+      log.info('posted', summarize(sighting, detail, distance));
+      posted += 1;
+    } catch (err) {
+      // Leave it unseen and hold the window open so the next cycle retries it
+      // rather than dropping the sighting on the floor — until it has failed
+      // often enough that retrying is just noise.
+      const attempts = store.noteFailure(sighting.id);
+      if (attempts >= config.poll.maxPostAttempts) {
+        log.error(
+          'giving up on this sighting after repeated Discord failures',
+          `${sighting.id} (${attempts} attempts, last: ${err.message})`,
+        );
+        store.markSkipped(sighting.id);
+      } else {
+        unannounced.add(sighting.id);
+        log.error('discord post failed, will retry next cycle', `${sighting.id} (attempt ${attempts}): ${err.message}`);
       }
+      continue;
     }
 
     store.markSeen(sighting.id);
@@ -154,11 +197,19 @@ async function runCycle({ config, store, center, dryRun }) {
     await sleep(config.poll.minSecondsBetweenPosts * 1000);
   }
 
-  const backlogSince = pendingBacklog(store, inArea, unannounced);
-  if (unannounced.size) {
-    log.info('holding window open', `${unannounced.size} sighting(s) still to announce`);
+  // A dry run must not move the window or the poll clock either: recording a poll
+  // here would rewrite state.json and advance lastPollAt, which both writes to disk
+  // and permanently suppresses the real alert for everything still queued.
+  // (SPARROWCORD-002)
+  if (!dryRun) {
+    const backlogSince = pendingBacklog(store, inArea, unannounced);
+    if (unannounced.size) {
+      log.info('holding window open', `${unannounced.size} sighting(s) still to announce`);
+    }
+    store.recordPoll({ since: nowSec, backlogSince });
+  } else if (unannounced.size) {
+    log.info('dry-run would hold the window open', `${unannounced.size} sighting(s) still to announce`);
   }
-  store.recordPoll({ since: nowSec, backlogSince });
 
   return { polled: rows.length, inArea: inArea.length, posted, held: unannounced.size };
 }
@@ -222,23 +273,39 @@ async function runTest({ config, center, ping, dryRun }) {
   log.info('test message sent', summarize(sighting, detail, distance));
 }
 
+function healthStatus(store, config, center) {
+  const snapshot = store.snapshot();
+  const ageSec = snapshot.lastPollAt ? (Date.now() - Date.parse(snapshot.lastPollAt)) / 1000 : null;
+  const pendingFailures = Object.keys(snapshot.failures ?? {}).length;
+  // A notifier that has discarded a sighting or is still failing to deliver
+  // must not report healthy: the Docker HEALTHCHECK and Uptime Kuma both
+  // read this, and a broken webhook is otherwise completely silent. (SPARROWCORD-003)
+  // degradedSince is what survives a give-up: markSkipped() clears the per-sighting
+  // failure, so pendingFailures alone returns to 0 and health would go green again.
+  const ok = Boolean(snapshot.lastPollAt)
+    && ageSec < config.poll.intervalSeconds * 6
+    && !snapshot.lastError
+    && pendingFailures === 0
+    && !snapshot.degradedSince;
+  return {
+    ok,
+    area: { label: center?.label, lat: center?.lat, lon: center?.lon, radiusMiles: config.area.radiusMiles },
+    lastPollAt: snapshot.lastPollAt,
+    lastPollAgeSeconds: ageSec === null ? null : Math.round(ageSec),
+    lastError: snapshot.lastError,
+    posts: snapshot.posted,
+    skipped: snapshot.skipped,
+    pendingFailures,
+    degradedSince: snapshot.degradedSince ?? null,
+    rememberedIds: snapshot.seenCount,
+  };
+}
+
 function startHealthServer(config, store, center) {
   if (!config.server.port) return null;
   const server = http.createServer((req, res) => {
     if (req.url === '/healthz' || req.url === '/') {
-      const snapshot = store.snapshot();
-      const ageSec = snapshot.lastPollAt ? (Date.now() - Date.parse(snapshot.lastPollAt)) / 1000 : null;
-      const body = {
-        ok: Boolean(snapshot.lastPollAt) && ageSec < config.poll.intervalSeconds * 6,
-        area: { label: center.label, lat: center.lat, lon: center.lon, radiusMiles: config.area.radiusMiles },
-        lastPollAt: snapshot.lastPollAt,
-        lastPollAgeSeconds: ageSec === null ? null : Math.round(ageSec),
-        lastError: snapshot.lastError,
-        posts: snapshot.posted,
-        skipped: snapshot.skipped,
-        pendingFailures: Object.keys(snapshot.failures ?? {}).length,
-        rememberedIds: snapshot.seenCount,
-      };
+      const body = healthStatus(store, config, center);
       res.writeHead(body.ok ? 200 : 503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(body, null, 2));
       return;
@@ -257,7 +324,13 @@ async function main() {
   const { config, sourcePath } = loadConfig(process.env);
   log.setLevel(config.logLevel);
   if (flags.area) config.area = { ...config.area, place: flags.area, lat: null, lon: null };
-  if (Number.isFinite(flags.radius)) config.area.radiusMiles = flags.radius;
+  if (Number.isFinite(flags.radius)) {
+    // loadConfig validates radiusMiles at load time, *before* this override runs,
+    // so a negative radius reached insideArea() unchecked. Validate here too.
+    // (SPARROWCORD-013)
+    if (flags.radius <= 0) throw new Error('--radius must be greater than 0');
+    config.area.radiusMiles = flags.radius;
+  }
   if (Number.isFinite(flags.backfillHours)) config.poll.backfillHours = flags.backfillHours;
   log.info('config', sourcePath ?? '(defaults + environment only)');
 
@@ -291,7 +364,8 @@ async function main() {
     'watching',
     `${center ? `${center.label}, ${config.area.radiusMiles} mi radius` : 'no area resolved'}, every ${config.poll.intervalSeconds}s`,
   );
-  if (!flags.dryRun) log.info('delivering to', redacted(config.discord.webhookUrl));
+  // `--check` never posts either, so the webhook line is noise there. (SPARROWCORD-011)
+  if (!flags.dryRun && !flags.check) log.info('delivering to', redacted(config.discord.webhookUrl));
 
   if (flags.test) {
     await runTest({
@@ -357,13 +431,22 @@ function redacted(url) {
   if (!url) return '(unset)';
   try {
     const u = new URL(url);
-    return `${u.origin}/api/webhooks/${u.pathname.split('/')[3] ?? ''}/…`;
+    // The ID is an identifier, not a credential, but it is the half an operator
+    // pastes into a bug report, so keep only the origin. The token (index 4) was
+    // already withheld and stays withheld. (SPARROWCORD-011)
+    return `${u.origin}/api/webhooks/…`;
   } catch {
     return '(unparseable)';
   }
 }
 
-main().catch((err) => {
-  console.error(`fatal: ${err.message}`);
-  process.exit(1);
-});
+export { redacted, startHealthServer, healthStatus, runCycle };
+
+// Only run main() when this file is the entrypoint, so the module can be
+// imported by the test suite without launching the poll loop.
+if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
+  main().catch((err) => {
+    console.error(`fatal: ${err.message}`);
+    process.exit(1);
+  });
+}

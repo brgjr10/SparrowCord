@@ -12,7 +12,8 @@
     "start": "node src/index.js",
     "once": "node src/index.js --once",
     "check": "node src/index.js --check",
-    "notify-test": "node src/index.js --test"
+    "notify-test": "node src/index.js --test",
+    "test": "node --test"
   },
   "dependencies": {}
 }

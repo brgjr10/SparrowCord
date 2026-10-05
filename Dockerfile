@@ -1,4 +1,11 @@
-FROM node:22-alpine
+# Pinned to the manifest digest of the `22-alpine` tag as of 2026-10-05, so
+# `docker compose up -d --build` cannot silently drift to a newer base.
+# (SPARROWCORD-016) — READ-ONLY: no Docker daemon or `docker` CLI on this host,
+# so the pin is verified by reading the Docker Hub API, not by building.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+
+LABEL org.opencontainers.image.source="https://github.com/brgjr10/SparrowCord"
+LABEL org.opencontainers.image.revision="068b3c4"
 
 WORKDIR /app
 

@@ -28,6 +28,7 @@ const CAMERA_LINES = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const backoff = (attempt) => Math.min(30000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 400);
 
 function labelFor(vclass) {
   return CLASS_LABELS[vclass] ?? CLASS_LABELS.unknown;
@@ -55,19 +56,33 @@ function cameraLine(where) {
 
 export function buildMessage(
   sighting,
-  { detail, distanceMiles, config, test = false, ping = config.discord.pingEveryone === true },
+  { detail, distanceMiles, config, snapshot, test = false, ping = config.discord.pingEveryone === true },
 ) {
-  const vclass = sighting.vclass ?? 'unknown';
+  // Normalise once, at the boundary: upstream rows are not guaranteed to be
+  // well-formed, and a string lat/lon or a missing ts throws inside the embed
+  // builder instead of degrading to a text alert. (SPARROWCORD-005)
+  const lat = Number(sighting.lat);
+  const lon = Number(sighting.lon);
+  const vclass = String(sighting.vclass ?? 'unknown').toLowerCase();
+  const ts = Number(sighting.ts);
+  const hasCoords = Number.isFinite(lat) && Number.isFinite(lon);
+  const hasTs = Number.isFinite(ts);
   const where = detail?.where ?? sighting.where ?? null;
   const filename = `flockord-${sighting.id}.jpg`;
   const place = [where?.road, where?.place].filter(Boolean).join(', ');
 
+  // The photo is gated on the bytes we actually have, not on the upstream
+  // `snap` metadata: a failed download must degrade to a text alert instead of
+  // producing a payload that references an attachment that is never uploaded.
+  // (SPARROWCORD-004)
+  const hasPhoto = Boolean(snapshot) && Boolean(sighting.snap);
+
   const fields = [];
   if (place) fields.push({ name: 'Where', value: clip(place, 900), inline: true });
-  if (Number.isFinite(sighting.lat) && Number.isFinite(sighting.lon)) {
+  if (hasCoords) {
     fields.push({
       name: 'Position',
-      value: clip(`${sighting.lat.toFixed(5)}, ${sighting.lon.toFixed(5)}`),
+      value: clip(`${lat.toFixed(5)}, ${lon.toFixed(5)}`),
       inline: true,
     });
   }
@@ -83,11 +98,11 @@ export function buildMessage(
     });
   }
 
-  const link = geoLink(config.links.geoProvider, sighting.lat, sighting.lon);
+  const link = geoLink(config.links.geoProvider, lat, lon);
   if (link) {
     fields.push({
       name: 'Open in maps',
-      value: clip(`[${sighting.lat.toFixed(5)}, ${sighting.lon.toFixed(5)}](${link})`),
+      value: clip(`[${lat.toFixed(5)}, ${lon.toFixed(5)}](${link})`),
       inline: true,
     });
   }
@@ -100,7 +115,7 @@ export function buildMessage(
     color: COLORS[vclass] ?? COLORS.unknown,
     description: `${
       test ? '**Test message from flockord. No new sighting is being reported.**\n' : ''
-    }Published <t:${Math.floor(sighting.ts)}:R> · <t:${Math.floor(sighting.ts)}:f>`,
+    }Published${hasTs ? ` <t:${Math.floor(ts)}:R> · <t:${Math.floor(ts)}:f>` : ''}`,
     fields: fields.slice(0, 25),
     footer: {
       text: clip(
@@ -110,10 +125,10 @@ export function buildMessage(
         2048,
       ),
     },
-    timestamp: new Date(sighting.ts * 1000).toISOString(),
+    timestamp: hasTs ? new Date(ts * 1000).toISOString() : undefined,
   };
 
-  if (sighting.snap) {
+  if (hasPhoto) {
     embed.image = { url: `${ATTACHMENT_PREFIX}${filename}` };
   }
 
@@ -123,7 +138,7 @@ export function buildMessage(
     content: ping ? '@everyone' : undefined,
     allowed_mentions: { parse: [], everyone: ping === true },
     embeds: [embed],
-    attachments: sighting.snap ? [{ id: 0, filename, description: 'Published sighting crop' }] : [],
+    attachments: hasPhoto ? [{ id: 0, filename, description: 'Published sighting crop' }] : [],
   };
 }
 
@@ -154,7 +169,7 @@ export async function postSighting(
   sighting,
   { detail, distanceMiles, config, snapshot, test = false, ping = config.discord.pingEveryone === true },
 ) {
-  const payload = buildMessage(sighting, { detail, distanceMiles, config, test, ping });
+  const payload = buildMessage(sighting, { detail, distanceMiles, config, snapshot, test, ping });
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const res = await send(
@@ -174,6 +189,15 @@ export async function postSighting(
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      // Discord 5xx is rare, which is exactly why a bounded in-process retry is
+      // cheap insurance: without it a transient 502 costs the sighting a whole
+      // poll cycle plus one of its five lifetime attempts. (SPARROWCORD-009)
+      if (res.status >= 500 && attempt < 2) {
+        const waitMs = backoff(attempt);
+        log.warn('discord server error, retrying', `${res.status} in ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
       throw new Error(`discord webhook ${res.status} ${res.statusText} ${text.slice(0, 300)}`);
     }
 

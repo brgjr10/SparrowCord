@@ -16,7 +16,10 @@ class HttpError extends Error {
 }
 
 function backoffMs(attempt, retryAfterMs) {
-  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return retryAfterMs;
+  // The feed's `retry-after` is honoured, but capped: an unbounded header can
+  // stall the poll loop for hours, and the sibling client in discord.js already
+  // clamps the same idea to 60 s. (SPARROWCORD-006)
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return Math.min(retryAfterMs, 60000);
   const base = Math.min(30000, 1000 * 2 ** attempt);
   return base + Math.floor(Math.random() * 400);
 }
@@ -75,7 +78,9 @@ export async function fetchSightings({ since, timeoutMs }) {
     out.push(...rows);
     if (rows.length < PAGE_LIMIT) break;
     const last = rows[rows.length - 1];
-    before = `&before=${last.ts}&before_id=${last.id}`;
+    // The cursor is remote data: interpolate it encoded, the way geocode() and
+    // fetchDetail() already do in this same module. (SPARROWCORD-010)
+    before = `&before=${encodeURIComponent(last.ts)}&before_id=${encodeURIComponent(last.id)}`;
   }
   return out.sort((a, b) => b.ts - a.ts);
 }
@@ -93,5 +98,16 @@ export async function fetchSnapshot(snap, timeoutMs) {
     timeoutMs,
     accept: 'image/*',
   });
-  return Buffer.from(await res.arrayBuffer());
+  // Trust the comment above, but enforce it: an upstream error page, captive
+  // portal or maintenance HTML is otherwise uploaded as a broken JPEG wrapped
+  // in a correct-looking embed. (SPARROWCORD-008)
+  const type = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+  if (!type.startsWith('image/')) {
+    throw new Error(`snapshot ${snap} is ${type || 'untyped'}, not an image`);
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > 512 * 1024) {
+    throw new Error(`snapshot ${snap} is ${bytes.length} bytes, refusing to upload`);
+  }
+  return bytes;
 }
